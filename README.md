@@ -22,12 +22,16 @@ The configuration of the final depolyment will be as follows:
 
 controller:
  -   Runs keystone, glance etc.
+
 dashboard: (not yet... (currently on controller))
  -   Runs horizon
+
 fileserver: (not yet... (curently on controller with file backend))
  -   Runs nfs backend for glance etc.
+
 network:
  -   Runs neuron with openVSwitch and gre tunnels
+
 compute[1 to x]:
  -   Runs nova-compute with kvm
 
@@ -36,14 +40,18 @@ The machines may be physical or vitualised in VMware, with the following configu
 
 controller:
  -   eth0: mangement network
+
 dashboard:
  -   eth0: mangement network
+
 fileserver:
  -   eth0: mangement network
+
 network:
  -   eth0: mangement network
  -   eth1: vm data network
  -   eth2: external network
+
 compute[1 to x]:
  -   eth0: mangement network
  -   eth1: vm data network
@@ -53,9 +61,11 @@ The servers should be installed without any configuration other than setting the
 management network
  -       Physical enviroment: >1Gb Ethernet, connected to unmanged switch (management switch)
  -       Virtual enviroment: VMware Fusion "share with my mac"
+
 vm data network
  -       Physical enviroment: >1Gb Ethernet, connected to unmanged switch (vm data switch)
  -       Virtual enviroment: VMware Fusion "private to my mac"
+
 external network
  -       Physical enviroment: >1Gb Ethernet, connected to gateway (OPT1,)
  -       Virtual enviroment: VMware Fusion "share with my mac"
