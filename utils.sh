@@ -74,6 +74,7 @@ run_ssh_cmd_with_retry () {
 
 update_host_date () {
     SSHUSER_HOST=$1
+    run_ssh_cmd_with_retry $SSHUSER_HOST "sudo yum install -y ntp"
     run_ssh_cmd_with_retry $SSHUSER_HOST "sudo ntpdate pool.ntp.org"
 }
 
