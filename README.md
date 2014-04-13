@@ -27,6 +27,7 @@ dashboard: (not yet... (currently on controller))
  -   Runs horizon
 
 fileserver: (not yet... (curently on controller with file backend))
+ -   Does not run any OpenStack Services
  -   Runs nfs backend for glance etc.
 
 network:
@@ -46,6 +47,7 @@ dashboard:
 
 fileserver:
  -   eth0: mangement network
+ -	 NFS export of /glance
 
 network:
  -   eth0: mangement network
@@ -75,7 +77,7 @@ In a physical enviroment the additional components are required:
 gateway:
  -   pfSense firewall configured with:
  -       WAN:
- -           Gets address via dhcp
+   -           Gets address via dhcp
  -       LAN:
  -           offers dhcp and dns
  -           192.168.0.0/24
