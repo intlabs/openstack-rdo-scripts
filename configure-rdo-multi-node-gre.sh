@@ -175,8 +175,8 @@ done
 
 echo "Configuring Packstack answer file services"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "\
-crudini --del packstack_answers.conf general CONFIG_PROVISION_DEMO && \
-crudini --set packstack_answers.conf general CONFIG_PROVISION_DEMO y"
+crudini --set packstack_answers.conf general CONFIG_HEAT_INSTALL y && \
+crudini --set packstack_answers.conf general CONFIG_NAGIOS_INSTALL y"
 
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "\
 crudini --set $ANSWERS_FILE general CONFIG_SSH_KEY /root/.ssh/id_rsa.pub && \
@@ -278,7 +278,7 @@ run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export export O
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export export OS_TENANT_NAME=demo' keystonerc_demo"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export export OS_PASSWORD=demo' keystonerc_demo"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export export OS_AUTH_URL=http://172.16.73.132:35357/v2.0/' keystonerc_demo"
-run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i "$ a\export export PS1='[\u@\h \W(keystone_demo)]\$ '" keystonerc_demo"
+#run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i "$ a\export export PS1='[\u@\h \W(keystone_demo)]\$ '" keystonerc_demo"
 
 echo "Create External network"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && neutron net-create ext-net --shared --router:external=True"
@@ -290,6 +290,11 @@ run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo &&
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && neutron router-create demo-router"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && neutron router-interface-add demo-router demo-subnet"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && neutron router-gateway-set demo-router ext-net"
+
+echo "Create Network security rules"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && nova secgroup-add-rule default icmp -1 -1 0.0.0.0/0"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && nova secgroup-add-rule default tcp 1 65535 0.0.0.0/0"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && nova secgroup-add-rule default udp 1 65535 0.0.0.0/0"
 
 echo "Test network"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "ping -c 4 172.16.73.220"
