@@ -29,7 +29,7 @@ do
 done
 
 RDO_ADMIN=root
-RDO_ADMIN_PASSWORD=Passw0rd
+RDO_ADMIN_PASSWORD=acoman
 
 ANSWERS_FILE=packstack_answers.conf
 NOVA_CONF_FILE=/etc/nova/nova.conf
@@ -173,6 +173,11 @@ do
     QEMU_COMPUTE_VM_IP_LIST+=$QEMU_COMPUTE_VM_IP
 done
 
+echo "Configuring Packstack answer file services"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "\
+crudini --del packstack_answers.conf general CONFIG_PROVISION_DEMO && \
+crudini --set packstack_answers.conf general CONFIG_PROVISION_DEMO y"
+
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "\
 crudini --set $ANSWERS_FILE general CONFIG_SSH_KEY /root/.ssh/id_rsa.pub && \
 crudini --set $ANSWERS_FILE general CONFIG_NTP_SERVERS 0.pool.ntp.org,1.pool.ntp.org,2.pool.ntp.org,3.pool.ntp.org && \
@@ -261,6 +266,43 @@ run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin &
 
 echo "Validating Neutron configuration"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && neutron agent-list -f csv | sed -e '1d' | sed -rn 's/\".*\",\".*\",\".*\",\"(.*)\",.*/\1/p' | sed -rn '/xxx/q1'" 10
+
+echo "Setting up demo user"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source keystonerc_admin && keystone user-create --name=demo --pass=demo --email=demo@example.com"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && keystone tenant-create --name=demo --description="Demo Tenant""
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && keystone user-role-add --user=demo --role=_member_ --tenant=demo"
+
+echo "Setting up demo user keystone source file"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "printf 'export OS_USERNAME=demo' > keystonerc_demo"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export export OS_USERNAME=demo' keystonerc_demo"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export export OS_TENANT_NAME=demo' keystonerc_demo"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export export OS_PASSWORD=demo' keystonerc_demo"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export export OS_AUTH_URL=http://172.16.73.132:35357/v2.0/' keystonerc_demo"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i "$ a\export export PS1='[\u@\h \W(keystone_demo)]\$ '" keystonerc_demo"
+
+echo "Create External network"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && neutron net-create ext-net --shared --router:external=True"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && neutron subnet-create ext-net --name ext-subnet  --allocation-pool start=172.16.73.220,end=172.16.73.240 --disable-dhcp --gateway 172.16.73.2 172.16.73.0/24"
+
+echo "Create Guest Network"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && neutron net-create demo-net"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && neutron subnet-create demo-net --name demo-subnet --gateway 192.168.1.1 192.168.1.0/24 --dns_nameservers list=true 8.8.4.4 8.8.8.8"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && neutron router-create demo-router"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && neutron router-interface-add demo-router demo-subnet"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && neutron router-gateway-set demo-router ext-net"
+
+echo "Test network"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "ping -c 4 172.16.73.220"
+
+echo "Get cirros image (for testing)"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && glance image-create --name="CirrOS-0.3.2" --disk-format=qcow2 --container-format=bare --is-public=true --copy-from http://cdn.download.cirros-cloud.net/0.3.2/cirros-0.3.2-x86_64-disk.img"
+
+echo "Check the demo user is happy"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && nova keypair-list"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && nova flavor-list"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && nova image-list"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && neutron net-list"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && nova secgroup-list"
 
 echo "RDO installed!"
 echo "SSH access:"

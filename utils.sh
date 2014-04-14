@@ -241,7 +241,7 @@ add_openstack_vars_to_bashrc () {
 
 export OS_USERNAME=admin
 export OS_TENANT_NAME=admin
-export OS_PASSWORD=Passw0rd
+export OS_PASSWORD=acoman
 export OS_AUTH_URL=http://$CONTROLLER_VM_IP:35357/v2.0/
 EOF"
 }

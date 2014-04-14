@@ -1,0 +1,30 @@
+controller
+
+yum install -y nano
+clear
+ifconfig
+nano /etc/sysconfig/network-scripts/ifcfg-eth0
+	DEVICE=eth0
+	ONBOOT=yes
+	BOOTPROTO=static
+	MTU=1500
+	IPADDR=172.16.73.132
+	NETMASK=255.255.255.0
+nano /etc/sysconfig/network
+	search localdomain openclcloud.lan
+	nameserver 172.16.73.2
+nano /etc/resolv.conf
+	search localdomain openclcloud.lan
+	nameserver 172.16.73.2
+service network restart
+nano cat /etc/selinux/config
+	SELINUX=disabled
+yum install -y ntp
+yum update -y && reboot
+shutdown -h now
+yum install -y http://dl.fedoraproject.org/pub/epel/6/x86_64/epel-release-6-8.noarch.rpm
+
+
+
+ssh-keygen -q -t rsa -f ~/.ssh/id_rsa_rdo -N "" -b 4096
+./configure-rdo-multi-node-gre.sh havana ~/.ssh/id_rsa_rdo rdo-controller 172.16.73.132 rdo-network 172.16.73.134 rdo-kvm 172.16.73.133
