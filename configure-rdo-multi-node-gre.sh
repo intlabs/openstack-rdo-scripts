@@ -2,7 +2,7 @@
 set -e
 
 if [ $# -lt 8 ] || [ $(($# % 2)) = 1 ]; then
-    echo "Usage: $0 <openstack_release> <ssh_key_file> <controller_host_name> <controller_host_ip> <network_host_name> <network_host_ip> [<qemu_compute_host_name> <qemu_compute_host_ip>]+"
+    echo "Usage: $0 <openstack_release> <ssh_key_file> <controller_host_name> <controller_host_ip> <network_host_name> <network_host_ip> <dashboard_host_name> <dashboard_host_ip> [<qemu_compute_host_name> <qemu_compute_host_ip>]+"
     exit 1
 fi
 
@@ -14,11 +14,13 @@ CONTROLLER_VM_NAME=$3
 CONTROLLER_VM_IP=$4
 NETWORK_VM_NAME=$5
 NETWORK_VM_IP=$6
+DASHBOARD_VM_NAME=$7
+DASHBOARD_VM_IP=$8
 
 i=0
 QEMU_COMPUTE_VM_NAMES=()
 QEMU_COMPUTE_VM_IPS=()
-for val in ${@:7}
+for val in ${@:9}
 do
    if [ $(($i % 2)) = 0 ]; then
        QEMU_COMPUTE_VM_NAMES+=($val)
@@ -52,6 +54,7 @@ echo "Configuring SSH public key authentication on the RDO hosts"
 
 configure_ssh_pubkey_auth $RDO_ADMIN $CONTROLLER_VM_IP $SSH_KEY_FILE_PUB $RDO_ADMIN_PASSWORD
 configure_ssh_pubkey_auth $RDO_ADMIN $NETWORK_VM_IP $SSH_KEY_FILE_PUB $RDO_ADMIN_PASSWORD
+configure_ssh_pubkey_auth $RDO_ADMIN $DASHBOARD_VM_IP $SSH_KEY_FILE_PUB $RDO_ADMIN_PASSWORD
 
 for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
 do
@@ -61,6 +64,7 @@ done
 echo "Sync hosts date and time"
 update_host_date $RDO_ADMIN@$CONTROLLER_VM_IP
 update_host_date $RDO_ADMIN@$NETWORK_VM_IP
+update_host_date $RDO_ADMIN@$DASHBOARD_VM_IP
 
 for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
 do
@@ -107,6 +111,9 @@ config_openstack_network_adapter $RDO_ADMIN@$NETWORK_VM_IP eth1 $NETWORK_VM_DATA
 config_openstack_network_adapter $RDO_ADMIN@$NETWORK_VM_IP eth2
 set_interface_static_ip_from_dhcp_centos $RDO_ADMIN@$NETWORK_VM_IP eth0
 set_hostname $RDO_ADMIN@$NETWORK_VM_IP $NETWORK_VM_NAME.$DOMAIN $NETWORK_VM_IP
+
+set_interface_static_ip_from_dhcp_centos $RDO_ADMIN@$DASHBOARD_VM_IP eth0
+set_hostname $RDO_ADMIN@$DASHBOARD_VM_IP $DASHBOARD_VM_NAME.$DOMAIN $DASHBOARD_VM_IP
 
 i=0
 for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
@@ -176,7 +183,12 @@ done
 echo "Configuring Packstack answer file services"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "\
 crudini --set packstack_answers.conf general CONFIG_HEAT_INSTALL y && \
+crudini --set packstack_answers.conf general CONFIG_HORIZON_HOST $DASHBOARD_VM_IP && \
+crudini --set packstack_answers.conf general CONFIG_HORIZON_SSL y && \
+crudini --set packstack_answers.conf general CONFIG_SWIFT_INSTALL y && \
 crudini --set packstack_answers.conf general CONFIG_NAGIOS_INSTALL y"
+
+echo "Configuring Swift on compute nodes with packstack"
 
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "\
 crudini --set $ANSWERS_FILE general CONFIG_SSH_KEY /root/.ssh/id_rsa.pub && \
@@ -194,13 +206,15 @@ crudini --set $ANSWERS_FILE general CONFIG_NEUTRON_OVS_TUNNEL_RANGES 1:1000 && \
 crudini --set $ANSWERS_FILE general CONFIG_NEUTRON_OVS_TUNNEL_IF eth1"
 
 echo "Deploying SSH private key on $CONTROLLER_VM_IP"
-
 scp -i $SSH_KEY_FILE -o 'PasswordAuthentication no' $SSH_KEY_FILE $RDO_ADMIN@$CONTROLLER_VM_IP:.ssh/id_rsa
 scp -i $SSH_KEY_FILE -o 'PasswordAuthentication no' $SSH_KEY_FILE_PUB $RDO_ADMIN@$CONTROLLER_VM_IP:.ssh/id_rsa.pub
 
 echo "Running Packstack"
-
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "packstack --answer-file=$ANSWERS_FILE"
+
+echo "Workaround for horizon tennant vs packstck mismatch"
+run_ssh_cmd_with_retry $RDO_ADMIN@$DASHBOARD_VM_IP "sed -i -e 's/OPENSTACK_KEYSTONE_DEFAULT_ROLE = \"Member\"/OPENSTACK_KEYSTONE_DEFAULT_ROLE = \"_member_\"/g' /etc/openstack-dashboard/local_settings"
+run_ssh_cmd_with_retry $RDO_ADMIN@$DASHBOARD_VM_IP "service httpd restart"
 
 echo "Workaround for Neutron OVS agent bug on controller"
 
@@ -217,7 +231,6 @@ disable_neutron_ovs_agent () {
 disable_neutron_ovs_agent $RDO_ADMIN@$CONTROLLER_VM_IP $CONTROLLER_VM_NAME.$DOMAIN
 
 echo "Additional firewall rules"
-
 # See https://github.com/stackforge/packstack/commit/ca46227119fd6a6e5b0f1ef19e8967d92a3b1f6c
 for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
 do
@@ -226,6 +239,18 @@ done
 
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $NETWORK_VM_IP/32 -p tcp --dport 9696 -j ACCEPT"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $NETWORK_VM_IP/32 -p tcp --dport 35357 -j ACCEPT"
+
+echo "Additional firewall rules - for horizon"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 5000 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 8000 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 8004 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 8773 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 8774 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 8776 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 8777 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 9292 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 9696 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 35357 -j ACCEPT"
 
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "service iptables save"
 
@@ -249,6 +274,7 @@ echo "Rebooting Linux nodes to load the new kernel"
 
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP reboot
 run_ssh_cmd_with_retry $RDO_ADMIN@$NETWORK_VM_IP reboot
+run_ssh_cmd_with_retry $RDO_ADMIN@$DASHBOARD_VM_IP reboot
 
 for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
 do
@@ -268,8 +294,8 @@ echo "Validating Neutron configuration"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && neutron agent-list -f csv | sed -e '1d' | sed -rn 's/\".*\",\".*\",\".*\",\"(.*)\",.*/\1/p' | sed -rn '/xxx/q1'" 10
 
 echo "Setting up demo user"
-run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source keystonerc_admin && keystone user-create --name=demo --pass=demo --email=demo@example.com"
-run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && keystone tenant-create --name=demo --description="Demo Tenant""
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && keystone user-create --name=demo --pass=demo --email=demo@example.com"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && keystone tenant-create --name=demo --description=Demo_Tenant"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && keystone user-role-add --user=demo --role=_member_ --tenant=demo"
 
 echo "Setting up demo user keystone source file"
@@ -291,15 +317,20 @@ run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo &&
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && neutron router-interface-add demo-router demo-subnet"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && neutron router-gateway-set demo-router ext-net"
 
-echo "Create Network security rules"
+echo "Create Network security rules - admin domain"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && nova secgroup-add-rule default icmp -1 -1 0.0.0.0/0"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && nova secgroup-add-rule default tcp 1 65535 0.0.0.0/0"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && nova secgroup-add-rule default udp 1 65535 0.0.0.0/0"
 
+echo "Create Network security rules - demo domain"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && nova secgroup-add-rule default icmp -1 -1 0.0.0.0/0"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && nova secgroup-add-rule default tcp 1 65535 0.0.0.0/0"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_demo && nova secgroup-add-rule default udp 1 65535 0.0.0.0/0"
+
 echo "Test network"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "ping -c 4 172.16.73.220"
 
-echo "Get cirros image (for testing)"
+echo "Get cirros image for testing"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin && glance image-create --name="CirrOS-0.3.2" --disk-format=qcow2 --container-format=bare --is-public=true --copy-from http://cdn.download.cirros-cloud.net/0.3.2/cirros-0.3.2-x86_64-disk.img"
 
 echo "Check the demo user is happy"
