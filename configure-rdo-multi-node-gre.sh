@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-if [ $# -lt 8 ] || [ $(($# % 2)) = 1 ]; then
-    echo "Usage: $0 <openstack_release> <ssh_key_file> <controller_host_name> <controller_host_ip> <network_host_name> <network_host_ip> <dashboard_host_name> <dashboard_host_ip> [<qemu_compute_host_name> <qemu_compute_host_ip>]+"
+if [ $# -lt 2 ] || [ $(($# % 2)) = 1 ]; then
+    echo "Usage: $0 <openstack_release> <ssh_key_file> [<qemu_compute_host_name> <qemu_compute_host_ip>]+"
     exit 1
 fi
 
@@ -10,17 +10,19 @@ OPENSTACK_RELEASE=$1
 
 SSH_KEY_FILE=$2
 
-CONTROLLER_VM_NAME=$3
-CONTROLLER_VM_IP=$4
-NETWORK_VM_NAME=$5
-NETWORK_VM_IP=$6
+CONTROLLER_VM_NAME=rdo-controller
+CONTROLLER_VM_IP=172.16.73.132
+NETWORK_VM_NAME=rdo-network
+NETWORK_VM_IP=172.16.73.134
 DASHBOARD_VM_NAME=$7
-DASHBOARD_VM_IP=$8
+DASHBOARD_VM_IP=172.16.73.137
+STORAGE_VM_NAME=rdo-storage
+STORAGE_VM_IP=172.16.73.142
 
 i=0
 QEMU_COMPUTE_VM_NAMES=()
 QEMU_COMPUTE_VM_IPS=()
-for val in ${@:9}
+for val in ${@:3}
 do
    if [ $(($i % 2)) = 0 ]; then
        QEMU_COMPUTE_VM_NAMES+=($val)
@@ -51,10 +53,10 @@ fi
 SSH_KEY_FILE_PUB=$SSH_KEY_FILE.pub
 
 echo "Configuring SSH public key authentication on the RDO hosts"
-
 configure_ssh_pubkey_auth $RDO_ADMIN $CONTROLLER_VM_IP $SSH_KEY_FILE_PUB $RDO_ADMIN_PASSWORD
 configure_ssh_pubkey_auth $RDO_ADMIN $NETWORK_VM_IP $SSH_KEY_FILE_PUB $RDO_ADMIN_PASSWORD
 configure_ssh_pubkey_auth $RDO_ADMIN $DASHBOARD_VM_IP $SSH_KEY_FILE_PUB $RDO_ADMIN_PASSWORD
+configure_ssh_pubkey_auth $RDO_ADMIN $STORAGE_VM_IP $SSH_KEY_FILE_PUB $RDO_ADMIN_PASSWORD
 
 for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
 do
@@ -65,6 +67,7 @@ echo "Sync hosts date and time"
 update_host_date $RDO_ADMIN@$CONTROLLER_VM_IP
 update_host_date $RDO_ADMIN@$NETWORK_VM_IP
 update_host_date $RDO_ADMIN@$DASHBOARD_VM_IP
+update_host_date $RDO_ADMIN@$STORAGE_VM_IP
 
 for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
 do
@@ -115,6 +118,9 @@ set_hostname $RDO_ADMIN@$NETWORK_VM_IP $NETWORK_VM_NAME.$DOMAIN $NETWORK_VM_IP
 set_interface_static_ip_from_dhcp_centos $RDO_ADMIN@$DASHBOARD_VM_IP eth0
 set_hostname $RDO_ADMIN@$DASHBOARD_VM_IP $DASHBOARD_VM_NAME.$DOMAIN $DASHBOARD_VM_IP
 
+set_interface_static_ip_from_dhcp_centos $RDO_ADMIN@$STORAGE_VM_IP eth0
+set_hostname $RDO_ADMIN@$STORAGE_VM_IP $STORAGE_VM_NAME.$DOMAIN $STORAGE_VM_IP
+
 i=0
 for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
 do
@@ -157,6 +163,65 @@ done
 
 # TODO: Check external network
 
+echo "Setting up NFS Server for cinder"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "yum install nfs* -y"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "service rpcbind start"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "chkconfig rpcbind on"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "service nfs start"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "chkconfig nfs on"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "mkdir /var/cinder_storage"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "chmod 755 /var/cinder_storage/"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "printf '/var/cinder_storage/         $CONTROLLER_VM_IP/24(rw,sync,no_root_squash,no_all_squash)' > /etc/exports"
+for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
+do
+    run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "sed -i '$ a\/var/cinder_storage/         $QEMU_COMPUTE_VM_IP/24(rw,sync,no_root_squash,no_all_squash)' /etc/exports"
+done
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "sed -i '$ a\/var/cinder_storage/         $NETWORK_VM_IP/24(rw,sync,no_root_squash,no_all_squash)' /etc/exports"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "sed -i '$ a\/var/cinder_storage/         $DASHBOARD_VM_IP/24(rw,sync,no_root_squash,no_all_squash)' /etc/exports"
+
+
+echo "NFS EXPORT firewall rules"
+for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
+do
+    run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $QEMU_COMPUTE_VM_IP/32 -p tcp --dport 2049 -j ACCEPT"
+    run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $QEMU_COMPUTE_VM_IP/32 -p tcp --dport 111 -j ACCEPT"
+    run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $QEMU_COMPUTE_VM_IP/32 -p tcp --dport 32803 -j ACCEPT"
+    run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $QEMU_COMPUTE_VM_IP/32 -p tcp --dport 892 -j ACCEPT"
+    run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $QEMU_COMPUTE_VM_IP/32 -p tcp --dport 875 -j ACCEPT"
+    run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $QEMU_COMPUTE_VM_IP/32 -p tcp --dport 662 -j ACCEPT"
+done
+
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $CONTROLLER_VM_IP/32 -p tcp --dport 2049 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $CONTROLLER_VM_IP/32 -p tcp --dport 111 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $CONTROLLER_VM_IP/32 -p tcp --dport 32803 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $CONTROLLER_VM_IP/32 -p tcp --dport 892 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $CONTROLLER_VM_IP/32 -p tcp --dport 875 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $CONTROLLER_VM_IP/32 -p tcp --dport 662 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $NETWORK_VM_IP/32 -p tcp --dport 2049 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $NETWORK_VM_IP/32 -p tcp --dport 111 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $NETWORK_VM_IP/32 -p tcp --dport 32803 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $NETWORK_VM_IP/32 -p tcp --dport 892 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $NETWORK_VM_IP/32 -p tcp --dport 875 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $NETWORK_VM_IP/32 -p tcp --dport 662 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 2049 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 111 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 32803 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 892 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 875 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 662 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "service iptables save"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "service iptables restart && iptables --list"
+
+
+echo "Setting up NFS Client for cinder"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "yum install nfs* -y"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "service rpcbind start"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "chkconfig rpcbind on"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "service nfs start"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "chkconfig nfs on"
+
+
+
 echo "Installing RDO RPMs on controller"
 
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "yum install -y http://rdo.fedorapeople.org/openstack/openstack-$OPENSTACK_RELEASE/rdo-release-$OPENSTACK_RELEASE.rpm || true"
@@ -186,6 +251,9 @@ crudini --set packstack_answers.conf general CONFIG_HEAT_INSTALL y && \
 crudini --set packstack_answers.conf general CONFIG_HORIZON_HOST $DASHBOARD_VM_IP && \
 crudini --set packstack_answers.conf general CONFIG_HORIZON_SSL y && \
 crudini --set packstack_answers.conf general CONFIG_SWIFT_INSTALL y && \
+crudini --set packstack_answers.conf general CONFIG_CINDER_BACKEND nfs && \
+crudini --set packstack_answers.conf general CONFIG_CINDER_VOLUMES_CREATE n && \
+crudini --set packstack_answers.conf general CONFIG_CINDER_NFS_MOUNTS $STORAGE_VM_IP:/var/cinder_storage && \
 crudini --set packstack_answers.conf general CONFIG_NAGIOS_INSTALL y"
 
 echo "Configuring Swift on compute nodes with packstack"
@@ -211,6 +279,7 @@ scp -i $SSH_KEY_FILE -o 'PasswordAuthentication no' $SSH_KEY_FILE_PUB $RDO_ADMIN
 
 echo "Running Packstack"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "packstack --answer-file=$ANSWERS_FILE"
+
 
 echo "Workaround for horizon tennant vs packstck mismatch"
 run_ssh_cmd_with_retry $RDO_ADMIN@$DASHBOARD_VM_IP "sed -i -e 's/OPENSTACK_KEYSTONE_DEFAULT_ROLE = \"Member\"/OPENSTACK_KEYSTONE_DEFAULT_ROLE = \"_member_\"/g' /etc/openstack-dashboard/local_settings"
@@ -275,6 +344,7 @@ echo "Rebooting Linux nodes to load the new kernel"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP reboot
 run_ssh_cmd_with_retry $RDO_ADMIN@$NETWORK_VM_IP reboot
 run_ssh_cmd_with_retry $RDO_ADMIN@$DASHBOARD_VM_IP reboot
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP reboot
 
 for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
 do
@@ -300,10 +370,10 @@ run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "source ./keystonerc_admin &
 
 echo "Setting up demo user keystone source file"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "printf 'export OS_USERNAME=demo' > keystonerc_demo"
-run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export export OS_USERNAME=demo' keystonerc_demo"
-run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export export OS_TENANT_NAME=demo' keystonerc_demo"
-run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export export OS_PASSWORD=demo' keystonerc_demo"
-run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export export OS_AUTH_URL=http://172.16.73.132:35357/v2.0/' keystonerc_demo"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export OS_USERNAME=demo' keystonerc_demo"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export OS_TENANT_NAME=demo' keystonerc_demo"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export OS_PASSWORD=demo' keystonerc_demo"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\export OS_AUTH_URL=http://172.16.73.132:35357/v2.0/' keystonerc_demo"
 #run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i "$ a\export export PS1='[\u@\h \W(keystone_demo)]\$ '" keystonerc_demo"
 
 echo "Create External network"
