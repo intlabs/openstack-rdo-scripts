@@ -1,0 +1,24 @@
+yum install scsi-target-utils -y
+service tgtd start && chkconfig tgtd on && service tgtd restart
+tgtadm --lld iscsi --mode target --op new --tid 1 --targetname iqn.2014-16.lan.cannycomputing.rdo-storage:disk1
+tgtadm --lld iscsi --mode target --op show
+tgtadm --lld iscsi --mode logicalunit --op new --tid 1 --lun 1 --backing-store /dev/sdd
+tgtadm --lld iscsi --mode target --op show
+tgtadm --lld iscsi --mode target --op bind --tid 1 --initiator-address 172.16.73.132 
+tgtadm --lld iscsi --mode account --op new --user user1 --password password1
+tgtadm --lld iscsi --mode account --op bind --tid 1 --user user1
+tgtadm --lld iscsi --mode acount --op show
+tgtadm --lld iscsi --mode target --op show
+tgt-admin --dump
+cat << EOF > /etc/tgt/targets.conf
+default-driver iscsi
+<target iqn.2014-16.lan.cannycomputing.rdo-storage:disk1>
+	backing-store /dev/sdd
+	incominguser user1 password1
+	initiator-address 172.16.73.132
+</target>
+EOF
+/etc/init.d/tgtd restart
+iptables -I INPUT -s 172.16.73.132 -p tcp --dport 3260 -j ACCEPT
+service iptables save
+service iptables restart && iptables --list

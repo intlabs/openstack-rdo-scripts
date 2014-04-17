@@ -1,4 +1,17 @@
 #!/bin/bash
+
+
+#To make this work requires a few nodes:
+#All should be running CentOS 6.5 minimal install with 1st nic set to dhcp no configuration of nodes post anaconda should be required. (This is an obvious lie - there is no cake)
+
+#compute: 1 nic - to management net
+#dashboard: 1 nic - to management net
+#network: 3 nic - management, data, external
+#compute-kvm: 2 nic - mangement, data
+#storage: 1 nic - mangement, must have mounted volume at /var/cinder_storage for cinder and raw disks sitting at /dev/sdd for swift and /dev/sde for glance"
+
+
+
 set -e
 
 if [ $# -lt 2 ] || [ $(($# % 2)) = 1 ]; then
@@ -14,7 +27,7 @@ CONTROLLER_VM_NAME=rdo-controller
 CONTROLLER_VM_IP=172.16.73.132
 NETWORK_VM_NAME=rdo-network
 NETWORK_VM_IP=172.16.73.134
-DASHBOARD_VM_NAME=$7
+DASHBOARD_VM_NAME=rdo-dashboard
 DASHBOARD_VM_IP=172.16.73.137
 STORAGE_VM_NAME=rdo-storage
 STORAGE_VM_IP=172.16.73.142
@@ -163,13 +176,15 @@ done
 
 # TODO: Check external network
 
-echo "Setting up NFS Server for cinder"
+echo "Installing NFS packages on storage node"
 run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "yum install nfs* -y"
 run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "service rpcbind start"
 run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "chkconfig rpcbind on"
 run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "service nfs start"
 run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "chkconfig nfs on"
-run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "mkdir /var/cinder_storage"
+
+echo "Setting up NFS Server for cinder"
+#run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "mkdir /var/cinder_storage"
 run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "chmod 755 /var/cinder_storage/"
 run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "printf '/var/cinder_storage/         $CONTROLLER_VM_IP/24(rw,sync,no_root_squash,no_all_squash)' > /etc/exports"
 for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
@@ -221,12 +236,92 @@ run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "service nfs start"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "chkconfig nfs on"
 
 
+echo "Installing iSCSI target on Storage Node"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "yum install scsi-target-utils -y"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "service tgtd start && chkconfig tgtd on && service tgtd restart"
+
+echo "Installing iSCSI target on Storage Node - for swift"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode target --op new --tid 1 --targetname iqn.2014-16.lan.cannycomputing.rdo-storage:disk1"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode target --op show"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode logicalunit --op new --tid 1 --lun 1 --backing-store /dev/sdd"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode target --op show"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode target --op bind --tid 1 --initiator-address $CONTROLLER_VM_IP "
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode account --op new --user cinderiscsi_user --password cinderiscsi_user_password"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode account --op bind --tid 1 --user cinderiscsi_user"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode account --op show"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode target --op show"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgt-admin --dump"
+
+echo "Installing iSCSI target on Storage Node - for glance"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode target --op new --tid 2 --targetname iqn.2014-16.lan.cannycomputing.rdo-storage:disk2"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode target --op show"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode logicalunit --op new --tid 2 --lun 1 --backing-store /dev/sde"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode target --op show"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode target --op bind --tid 2 --initiator-address $CONTROLLER_VM_IP "
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode account --op new --user glanceiscsi_user --password glanceiscsi_user_password"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode account --op bind --tid 2 --user glanceiscsi_user"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode account --op show"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgtadm --lld iscsi --mode target --op show"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgt-admin --dump"
+
+echo "Manually writing iSCSI target settings on Storage Node"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "cat << EOF > /etc/tgt/targets.conf
+default-driver iscsi
+<target iqn.2014-16.lan.cannycomputing.rdo-storage:disk1>
+    backing-store /dev/sdd
+    incominguser cinderiscsi_user cinderiscsi_user_password
+    initiator-address $CONTROLLER_VM_IP
+</target>
+<target iqn.2014-16.lan.cannycomputing.rdo-storage:disk2>
+    backing-store /dev/sde
+    incominguser glanceiscsi_user glanceiscsi_user_password
+    initiator-address $CONTROLLER_VM_IP
+</target>
+EOF"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "/etc/init.d/tgtd restart"
+echo "checking our targets are still running on storage node"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "tgt-admin --dump"
+
+echo "Setting up firewall on Storage Node for iscsi"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "iptables -I INPUT -s $CONTROLLER_VM_IP -p tcp --dport 3260 -j ACCEPT"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "service iptables save"
+run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP "service iptables restart && iptables --list"
+
+echo "Installing iSCSI initiator on Controller Node"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "yum install iscsi-initiator-utils -y"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "service iscsi start && chkconfig iscsi on"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "service iscsid start && chkconfig iscsid on"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iscsiadm --mode discoverydb --type sendtargets --portal $STORAGE_VM_IP  --discover"
+
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i -e 's/node.session.auth.authmethod = None/node.session.auth.authmethod = CHAP\\n node.session.auth.username = cinderiscsi_user\\n node.session.auth.password = cinderiscsi_user_password /g' /var/lib/iscsi/nodes/iqn.2014-16.lan.cannycomputing.$STORAGE_VM_NAME\:disk1/$STORAGE_VM_IP\,3260\,1/default"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iscsiadm --mode node --targetname iqn.2014-16.lan.cannycomputing.$STORAGE_VM_NAME:disk1 --portal $STORAGE_VM_IP -l "
+
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i -e 's/node.session.auth.authmethod = None/node.session.auth.authmethod = CHAP\\n node.session.auth.username = glanceiscsi_user\\n node.session.auth.password = glanceiscsi_user_password /g' /var/lib/iscsi/nodes/iqn.2014-16.lan.cannycomputing.$STORAGE_VM_NAME\:disk2/$STORAGE_VM_IP\,3260\,1/default"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iscsiadm --mode node --targetname iqn.2014-16.lan.cannycomputing.$STORAGE_VM_NAME:disk2 --portal $STORAGE_VM_IP -l "
+
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "service iscsid start && chkconfig iscsid on && service iscsid restart"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "service iscsi start && chkconfig iscsi on && service iscsi restart"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "fdisk -l | grep Disk"
+echo "SERIOUSLY: I'm just about to format a disk with NO sanity checking, mad or what. I'll give myself 30 seconds to think about how bad an idea this is (along with how much the above sucks)"
+echo "run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "mkfs.ext4 -F /dev/sdb""
+echo "run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "mkfs.ext4 -F /dev/sdc""
+sleep 1
+echo "formatting swift volume!!!"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "mkfs.ext4 -F /dev/sdb"
+echo "formatting glance volume!!!"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "mkfs.ext4 -F /dev/sdc"
+
+echo "mount glance iscsi target on controller node and add entry to fstab"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "mkdir -p /var/lib/glance"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "mount /dev/sdc /var/lib/glance"
+run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "sed -i '$ a\/dev/sdc /var/lib/glance   ext4 _netdev 0 0' /etc/fstab"
+
+
+
 
 echo "Installing RDO RPMs on controller"
-
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "yum install -y http://rdo.fedorapeople.org/openstack/openstack-$OPENSTACK_RELEASE/rdo-release-$OPENSTACK_RELEASE.rpm || true"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "yum install -y openstack-packstack"
-
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "yum -y install http://dl.fedoraproject.org/pub/epel/6/x86_64/epel-release-6-8.noarch.rpm || true"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "yum install -y crudini"
 
@@ -251,6 +346,7 @@ crudini --set packstack_answers.conf general CONFIG_HEAT_INSTALL y && \
 crudini --set packstack_answers.conf general CONFIG_HORIZON_HOST $DASHBOARD_VM_IP && \
 crudini --set packstack_answers.conf general CONFIG_HORIZON_SSL y && \
 crudini --set packstack_answers.conf general CONFIG_SWIFT_INSTALL y && \
+crudini --set packstack_answers.conf general CONFIG_SWIFT_STORAGE_HOSTS $CONTROLLER_VM_IP/sdb && \
 crudini --set packstack_answers.conf general CONFIG_CINDER_BACKEND nfs && \
 crudini --set packstack_answers.conf general CONFIG_CINDER_VOLUMES_CREATE n && \
 crudini --set packstack_answers.conf general CONFIG_CINDER_NFS_MOUNTS $STORAGE_VM_IP:/var/cinder_storage && \
@@ -320,7 +416,6 @@ run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHB
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 9292 -j ACCEPT"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 9696 -j ACCEPT"
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "iptables -I INPUT -s $DASHBOARD_VM_IP/32 -p tcp --dport 35357 -j ACCEPT"
-
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP "service iptables save"
 
 echo "Disabling Nova API rate limits"
@@ -340,17 +435,14 @@ echo "Applying additional OVS configuration on $NETWORK_VM_IP"
 run_ssh_cmd_with_retry $RDO_ADMIN@$NETWORK_VM_IP "ovs-vsctl list-ports br-ex | grep eth2 || ovs-vsctl add-port br-ex eth2"
 
 echo "Rebooting Linux nodes to load the new kernel"
-
 run_ssh_cmd_with_retry $RDO_ADMIN@$CONTROLLER_VM_IP reboot
 run_ssh_cmd_with_retry $RDO_ADMIN@$NETWORK_VM_IP reboot
 run_ssh_cmd_with_retry $RDO_ADMIN@$DASHBOARD_VM_IP reboot
 run_ssh_cmd_with_retry $RDO_ADMIN@$STORAGE_VM_IP reboot
-
 for QEMU_COMPUTE_VM_IP in ${QEMU_COMPUTE_VM_IPS[@]}
 do
     run_ssh_cmd_with_retry $RDO_ADMIN@$QEMU_COMPUTE_VM_IP reboot
 done
-
 echo "Wait for reboot"
 sleep 120
 
